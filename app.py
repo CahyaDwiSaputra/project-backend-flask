@@ -1,101 +1,40 @@
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from flask_bcrypt import Bcrypt
-from flask_cors import CORS
+import time
+from flask import Flask
+from sqlalchemy.exc import OperationalError
+from config import Config
+from extensions import db, bcrypt, cors
+from controllers.auth_controller import auth_bp
+from controllers.sensor_controller import sensor_bp 
 
-# Inisialisasi Aplikasi
-app = Flask(__name__)
-CORS(app) # Izinkan React (dari port 3000) mengakses Flask (di port 5000)
+def create_app():
+    app = Flask(__name__)
+    app.config.from_object(Config)
 
-# =======================================================
-# KONEKSI KE DATABASE (SESUAIKAN DENGAN PUNYA ANDA)
-# =======================================================
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://root:@localhost/rawattani_db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-db = SQLAlchemy(app)
-bcrypt = Bcrypt(app)
-
-# =======================================================
-# MODEL DATABASE (DISESUAIKAN DENGAN REGISTER.JSX)
-# =======================================================
-class User(db.Model):
-    # Nama tabel di database
-    __tablename__ = 'user' 
+    db.init_app(app)
+    bcrypt.init_app(app)
+    cors.init_app(app)
     
-    # Kolom-kolomnya, SESUAIKAN DENGAN PHP MYADMIN
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    fullName = db.Column(db.String(255), nullable=False)
-    email = db.Column(db.String(255), unique=True, nullable=False)
-    phone = db.Column(db.String(50), nullable=False)
-    password = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(50), nullable=False, default='user')
-
-    # Fungsi untuk membuat objek User baru
-    def __init__(self, fullName, email, phone, password):
-        self.fullName = fullName
-        self.email = email
-        self.phone = phone
-        # Password langsung di-hash saat dibuat
-        self.password = bcrypt.generate_password_hash(password).decode('utf-8')
-
-# Buat tabel jika belum ada
-with app.app_context():
-    db.create_all()
-
-# =======================================================
-# ENDPOINT API UNTUK REGISTER (SESUAI REGISTER.JSX)
-# =======================================================
-@app.route('/register', methods=['POST'])
-def register():
-    # Ambil data JSON yang dikirim oleh React
-    data = request.get_json()
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(sensor_bp)
     
-    # Cek apakah email sudah terdaftar
-    user_exists = User.query.filter_by(email=data['email']).first()
-    if user_exists:
-        return jsonify(error='Email sudah terdaftar'), 409 # 409 = Conflict
-        
-    # Buat user baru dengan semua data
-    new_user = User(
-        fullName=data['fullName'],
-        email=data['email'],
-        phone=data['phone'],
-        password=data['password']
-    )
-    
-    # Simpan ke database
-    db.session.add(new_user)
-    db.session.commit()
-    
-    return jsonify(message='User berhasil dibuat'), 201 # 201 = Created
+    # --- LOGIKA RETRY KONEKSI DATABASE ---
+    with app.app_context():
+        # Coba konek maksimal 10 kali
+        for i in range(10):
+            try:
+                db.create_all()
+                print("✅ Database Connected & Tables Created!")
+                break # Berhasil, keluar dari loop
+            except OperationalError as e:
+                print(f"⚠️ Database belum siap... Retrying ({i+1}/10)")
+                time.sleep(5) # Tunggu 5 detik sebelum coba lagi
+        else:
+            print("❌ Gagal konek ke Database setelah 10 percobaan.")
+            # Tetap lanjut (atau bisa exit), tapi biasanya container akan restart
+            
+    return app
 
-# =======================================================
-# ENDPOINT API UNTUK LOGIN (SESUAI LOGIN.JSX)
-# =======================================================
-@app.route('/login', methods=['POST'])
-def login():
-    # Ambil data JSON dari React
-    data = request.get_json()
-    email = data['email']
-    password = data['password']
-    
-    # Cari user di database berdasarkan email
-    user = User.query.filter_by(email=email).first()
-    
-    # Cek user dan password (hash)
-    if user and bcrypt.check_password_hash(user.password, password):
-        # Jika berhasil, kirim pesan dan nama user
-        return jsonify(
-            message='Login berhasil', 
-            user={'fullName': user.fullName, 'email': user.email, 'phone': user.phone, 'role': user.role}
-        ), 200
-    else:
-        # Jika gagal
-        return jsonify(error='Email atau password salah'), 401 # 401 = Unauthorized
-
-# =======================================================
-# JALANKAN SERVER
-# =======================================================
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app = create_app()
+    # Host 0.0.0.0 PENTING agar bisa diakses dari luar container
+    app.run(debug=True, host='0.0.0.0', port=5000)
